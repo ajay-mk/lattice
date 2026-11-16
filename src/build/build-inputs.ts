@@ -17,8 +17,13 @@ const GENERATED_FILE = new RegExp(`\\.(?:${[
  */
 const GENERATED_FOR_DOCUMENT = /^(?:\.(?:pdf|bbl|idx|ind|ist|gl[os]|ac[nr]|alg|loa|thm|nlo|nls|tdo|pytxcode)|-blx\.bib)$/i;
 
-/** Folders a package fills while compiling (minted's cache, the svg package's conversions). */
-const GENERATED_FOLDER = /^(?:_minted[^/]*|svg-inkscape)(?:\/|$)/;
+/**
+ * Folders a package fills while compiling (minted's cache, the svg package's
+ * conversions), at any depth, the folder itself included. Kept aligned with
+ * `PACKAGE_CACHES` in `src-tauri/lattice-core/src/project/tree.rs`, which
+ * the tree and Overleaf sync use: a writer's `_minted_snippets/` is a source.
+ */
+const GENERATED_FOLDER = /(?:^|\/)(?:_minted(?:-[^/]+)?|svg-inkscape)(?:\/|$)/;
 
 /**
  * The temporary `ProjectFs::atomic_write` writes beside a file and renames over it;

@@ -1,6 +1,7 @@
 //! What a project folder contains: the file tree each view shows, content
 //! classification, and reading text files.
 
+use super::package_cache::in_package_cache_folder;
 use super::paths::{extension, safe_path};
 use crate::models::FileNode;
 use crate::util::err;
@@ -272,6 +273,7 @@ fn exclusion_reason(relative: &Path, name: &str, path: &Path) -> Option<&'static
         return Some("generated-directory");
     }
     if is_build_artifact(path)
+        || in_package_cache_folder(&normalized, path.is_dir())
         || name.ends_with('~')
         || name.ends_with(".swp")
         || name.ends_with(".tmp")

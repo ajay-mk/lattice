@@ -82,10 +82,11 @@ fn ends_with_ignore_case(text: &str, suffix: &str) -> bool {
 }
 
 /// Folders a package fills while compiling (minted's cache, the svg
-/// package's conversions).
+/// package's conversions), at any depth: the rule the tree and Overleaf sync
+/// use too. The watcher reports the folder itself as it is made, so the
+/// last name counts as a folder.
 fn in_generated_folder(file: &str) -> bool {
-    let first = file.split('/').next().unwrap_or_default();
-    first.starts_with("_minted") || first == "svg-inkscape"
+    lattice_core::project::in_package_cache_folder(file, true)
 }
 
 /// The temporary `ProjectFs::atomic_write` writes beside a file and renames
@@ -178,6 +179,8 @@ mod tests {
             "chapters/thesis.pdf",
             "_minted-main/default.pygstyle",
             "svg-inkscape/plot_svg-tex.pdf",
+            "chapters/_minted/5F2A1B.highlight.minted",
+            "_minted-main",
             ".git/index",
             ".lattice-0f3a-9b.tmp",
             "refs/.lattice-0f3a.tmp.bib",
@@ -199,6 +202,7 @@ mod tests {
             "styles/paper.sty",
             ".lattice-notes.tmp",
             "notes.md",
+            "_minted_snippets/hello.py",
         ] {
             assert!(!is_build_output(path, &roots()), "{path} is an input");
         }

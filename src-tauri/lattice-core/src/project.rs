@@ -48,6 +48,7 @@ mod linked_sources_tests;
 mod manifest;
 mod manifest_settings;
 mod moved_file;
+mod package_cache;
 mod paths;
 mod pdf_copy;
 mod references;
@@ -116,6 +117,7 @@ pub use manifest_settings::{
     update_manifest_settings, ManifestSettings,
 };
 pub use moved_file::find_moved_file;
+pub use package_cache::in_package_cache_folder;
 pub use paths::safe_path;
 pub(crate) use paths::{creation_path, stays_inside};
 pub use pdf_copy::save_asset_copy;
