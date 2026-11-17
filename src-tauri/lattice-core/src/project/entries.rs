@@ -9,7 +9,7 @@ use super::manifest::{read_manifest, write_manifest};
 use super::paths::{
     creation_path, extension, safe_path, source_kind, validate_entry_name, validate_user_entry,
 };
-use super::tree::tex_build_outputs;
+use super::tree::{tex_build_outputs, DOCUMENT_OUTPUT_EXTENSIONS};
 use crate::models::FileChange;
 use crate::project_fs::ProjectDir;
 use crate::util::err;
@@ -211,7 +211,11 @@ fn remove_tex_build_artifacts(root: &Path, relative: &str) -> Result<(), String>
         .map(|name| tex_path.with_file_name(name))
         .into_iter()
         .filter(|_| !stem.is_empty());
-    let extended = tex_build_outputs().map(|extension| tex_path.with_extension(extension));
+    // Named after the document too (`main.gls`), and once it moves nothing
+    // beside them gives them away either.
+    let extended = tex_build_outputs()
+        .chain(DOCUMENT_OUTPUT_EXTENSIONS.iter().copied())
+        .map(|extension| tex_path.with_extension(extension));
     for path in extended.chain(named) {
         match fs::remove_file(path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
@@ -487,6 +491,8 @@ mod tests {
             "main.bbl-SAVE-ERROR",
             "acs-main.bib",
             "main-blx.bib",
+            "main.gls",
+            "main.ist",
         ];
         for path in stale.iter().chain(&["main.gz", "sections/main.pdf"]) {
             fixture.write(path, b"stale");

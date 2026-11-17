@@ -29,6 +29,7 @@ const TEXT_SNIFF_BYTES: u64 = 64 * 1024;
 /// should not sit in the tree pretending to be project content.
 const LATEX_ARTIFACT_EXTENSIONS: &[&str] = &[
     "aux",
+    "auxlock",
     "bbl",
     "bcf",
     "blg",
@@ -36,11 +37,13 @@ const LATEX_ARTIFACT_EXTENSIONS: &[&str] = &[
     "dvi",
     "fdb_latexmk",
     "fls",
+    "glg",
     "idx",
     "ilg",
     "ind",
     "lof",
     "log",
+    "lol",
     "lot",
     "nav",
     "out",
@@ -51,6 +54,18 @@ const LATEX_ARTIFACT_EXTENSIONS: &[&str] = &[
     "toc",
     "vrb",
     "xdv",
+];
+
+/// Extensions of the files a package or tool run writes under the document's
+/// own name (`main.gls` for `main.tex`): makeglossaries, nomencl, elsarticle,
+/// todonotes, pythontex and the `\listof...` lists. Only the `.tex` beside
+/// one gives it away, since some of these extensions are also sources: a
+/// writer's own `mystyle.ist` is a makeindex style. Kept aligned with
+/// `DOCUMENT_OUTPUT_EXTENSIONS` in `overleaf/files.rs`. Deleted when the
+/// `.tex` moves, but never `.gitignore`d: a blanket `*.ist` would catch that
+/// style file too.
+pub(super) const DOCUMENT_OUTPUT_EXTENSIONS: &[&str] = &[
+    "acn", "acr", "alg", "glo", "gls", "ist", "loa", "nlo", "nls", "pytxcode", "spl", "tdo", "thm",
 ];
 
 /// `.gitignore` entries for what a LaTeX run leaves beside the source. The
@@ -103,6 +118,14 @@ pub(super) fn is_build_artifact(path: &Path) -> bool {
         }) {
             return true;
         }
+    }
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| DOCUMENT_OUTPUT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        && path.with_extension("tex").exists()
+    {
+        return true;
     }
     let lowercased = name.to_ascii_lowercase();
     // latexmk renames instead of deleting whenever biber leaves behind a file
@@ -661,6 +684,17 @@ mod tests {
             ("acs-main.bib", "@Control{achemso-control,}"),
             ("main-blx.bib", "@Comment{biblatex}"),
             ("acs-refs.bib", "@article{b,}"),
+            // Glossaries, nomencl and elsarticle outputs hide beside their
+            // `.tex`; a writer's own makeindex style does not.
+            ("main.glo", "glossary"),
+            ("main.gls", "glossary"),
+            ("main.glg", "makeindex log"),
+            ("main.ist", "glossary style"),
+            ("main.nls", "nomenclature"),
+            ("main.spl", "elsarticle"),
+            ("main.lol", "listings"),
+            ("main.auxlock", "tikz externalize"),
+            ("mystyle.ist", "makeindex style"),
             // SyncTeX output, finished or still being written.
             ("main.synctex", "SyncTeX data"),
             ("main.synctex.gz", "SyncTeX data"),
@@ -678,6 +712,7 @@ mod tests {
             "acs-refs.bib",
             "data.xml",
             "main.tex",
+            "mystyle.ist",
             "notes(busy)",
             "reading.pdf",
             "references.bib",

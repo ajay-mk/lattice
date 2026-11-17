@@ -25,6 +25,7 @@ pub(super) const MAX_SYNC_FILE_BYTES: u64 = 45 * 1024 * 1024;
 /// LaTeX build artifacts that never sync in either direction.
 const ARTIFACT_SUFFIXES: &[&str] = &[
     ".aux",
+    ".auxlock",
     ".bbl",
     ".bcf",
     ".blg",
@@ -32,6 +33,7 @@ const ARTIFACT_SUFFIXES: &[&str] = &[
     ".dvi",
     ".fdb_latexmk",
     ".fls",
+    ".glg",
     ".idx",
     ".ilg",
     ".ind",
@@ -42,11 +44,20 @@ const ARTIFACT_SUFFIXES: &[&str] = &[
     ".synctex.gz",
     ".toc",
     ".lof",
+    ".lol",
     ".lot",
     ".nav",
     ".snm",
     ".vrb",
     ".xdv",
+];
+
+/// What a package or tool run writes under the document's own name
+/// (`main.gls` for `main.tex`), left out only with that `.tex` beside it: a
+/// writer's own `mystyle.ist` is a makeindex style and syncs. Kept aligned
+/// with `DOCUMENT_OUTPUT_EXTENSIONS` in `project/tree.rs`.
+const DOCUMENT_OUTPUT_EXTENSIONS: &[&str] = &[
+    "acn", "acr", "alg", "glo", "gls", "ist", "loa", "nlo", "nls", "pytxcode", "spl", "tdo", "thm",
 ];
 
 /// Agent PDF rendering uses this local workspace for contact sheets and page
@@ -104,6 +115,7 @@ pub(super) fn is_build_output_of(path: &str, is_source: impl Fn(&str) -> bool) -
     let folder = path.rsplit_once('/').map_or(String::new(), |(folder, _)| format!("{folder}/"));
     (ARTIFACT_SUFFIXES.iter().filter_map(|suffix| name.strip_suffix(suffix)))
         .any(|stem| is_source(&format!("{folder}{stem}.tex")))
+        || is_document_output(path, &is_source)
         || is_generated_bibliography(path, &is_source)
 }
 
@@ -129,10 +141,24 @@ pub(super) fn retain_syncable<V>(files: &mut BTreeMap<String, V>, build_pdf: &Bu
 }
 
 /// What a build writes beside a `.tex` under a name only that `.tex` gives
-/// away ([`is_compiled_pdf`], [`is_generated_bibliography`]); `has` says
-/// whether the project holds a path.
+/// away ([`is_compiled_pdf`], [`is_document_output`],
+/// [`is_generated_bibliography`]); `has` says whether the project holds a path.
 fn is_generated_beside_source(path: &str, has: impl Fn(&str) -> bool) -> bool {
-    is_compiled_pdf(path, &has) || is_generated_bibliography(path, &has)
+    is_compiled_pdf(path, &has)
+        || is_document_output(path, &has)
+        || is_generated_bibliography(path, &has)
+}
+
+/// Whether `path` is one of [`DOCUMENT_OUTPUT_EXTENSIONS`] beside the `.tex`
+/// of the same name (`has` says): `main.gls` with `main.tex`.
+fn is_document_output(path: &str, has: impl Fn(&str) -> bool) -> bool {
+    let Some((stem, extension)) = path.rsplit_once('.') else {
+        return false;
+    };
+    let named = !stem.is_empty() && !stem.ends_with('/');
+    named
+        && DOCUMENT_OUTPUT_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        && has(&format!("{stem}.tex"))
 }
 
 /// Whether `path` is a `.bib` a package writes on every compile of the
@@ -525,6 +551,11 @@ mod tests {
             ("nested/chapter.synctex", true),
             ("main.run.xml", true),
             ("main.bcf", true),
+            ("main.glg", true),
+            ("main.lol", true),
+            ("main.auxlock", true),
+            // Named after the document, so only left out beside its `.tex`.
+            ("main.gls", false),
             ("lambda_gpu_proposal.bbl-SAVE-ERROR", true),
             // A source file whose name merely ends in "(busy)" is still source.
             ("notes(busy).tex", false),
@@ -584,6 +615,33 @@ mod tests {
         retain_syncable(&mut table, &BuildPdf::default());
         assert!(!table.contains_key("acs-main.bib"));
         assert!(table.contains_key("refs.bib") && table.contains_key("acs-refs.bib"));
+    }
+
+    /// makeglossaries, nomencl and elsarticle write these under the job
+    /// name; only the `.tex` beside one gives it away.
+    #[test]
+    fn a_documents_glossary_and_nomenclature_files_are_left_out() {
+        let names = [
+            "main.tex",
+            "main.glo",
+            "main.gls",
+            "main.ist",
+            "main.nls",
+            "main.spl",
+            "mystyle.ist",
+            "notes.gls",
+            "paper/article.tex",
+            "paper/article.acn",
+        ];
+        let files: BTreeMap<String, ()> = names.iter().map(|name| (name.to_string(), ())).collect();
+        let left_out: Vec<&str> =
+            files.keys().map(String::as_str).filter(|path| excluded_in(&files, path)).collect();
+        assert_eq!(
+            left_out,
+            ["main.glo", "main.gls", "main.ist", "main.nls", "main.spl", "paper/article.acn"]
+        );
+        assert!(is_build_output_of("main.gls", |source| source == "main.tex"));
+        assert!(!is_build_output_of("mystyle.ist", |source| source == "main.tex"));
     }
 
     #[test]
