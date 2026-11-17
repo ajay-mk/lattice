@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Action, SharedString};
 use lattice_core::papers::PaperSummary;
+use lattice_core::project::project_tree_path_visible;
 use lattice_i18n::t;
 
 use super::{
@@ -316,26 +317,11 @@ pub(super) fn prose_score(text: &str, query: &str) -> Option<i64> {
     (several && terms.all(|term| text.contains(term))).then_some(500)
 }
 
-/// The project's files, as the tree lists them (no build products, no
-/// hidden folders), relative to the root.
+/// The project's files, as the tree lists them, relative to the root. The
+/// tree's own rule (`project_tree_path_visible`) decides, so build output
+/// such as `_minted-main/`, `svg-inkscape/`, `.nav` or the compiled PDF, and
+/// dotted or generated folders, stay out here exactly as they do there.
 pub(super) fn project_files(root: &Path) -> Vec<Entry> {
-    const SKIPPED: [&str; 4] = ["node_modules", "target", "__pycache__", "_minted"];
-    const HIDDEN: [&str; 14] = [
-        "aux",
-        "bbl",
-        "bcf",
-        "blg",
-        "fdb_latexmk",
-        "fls",
-        "log",
-        "out",
-        "toc",
-        "synctex",
-        "gz",
-        "xdv",
-        "run.xml",
-        "lof",
-    ];
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     'walk: while let Some(dir) = stack.pop() {
@@ -344,21 +330,18 @@ pub(super) fn project_files(root: &Path) -> Vec<Entry> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if !project_tree_path_visible(root, relative) {
                 continue;
             }
             if path.is_dir() {
                 let linked = entry.file_type().is_ok_and(|kind| kind.is_symlink());
-                if !linked && !SKIPPED.contains(&name.as_str()) {
+                if !linked {
                     stack.push(path);
                 }
                 continue;
             }
-            if HIDDEN.iter().any(|ext| name.ends_with(&format!(".{ext}"))) {
-                continue;
-            }
-            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let name = entry.file_name().to_string_lossy().into_owned();
             let folder = relative
                 .parent()
                 .map(|parent| parent.to_string_lossy().into_owned())
@@ -473,6 +456,49 @@ mod tests {
             .collect();
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
         assert_eq!(names, ["thesis.tex"]);
+    }
+
+    /// As the Project tree: package caches, beamer and index output, the
+    /// compiled PDF and generated bibliographies stay out of the palette.
+    #[test]
+    fn files_the_tree_hides_are_not_listed() {
+        let root = std::env::temp_dir()
+            .join(format!("lattice-gpui-palette-tree-{}", std::process::id()))
+            .join("thesis");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("_minted-main")).unwrap();
+        std::fs::create_dir_all(root.join("svg-inkscape")).unwrap();
+        std::fs::create_dir_all(root.join(".vscode")).unwrap();
+        for file in [
+            "main.tex",
+            "refs.bib",
+            "figure.pdf",
+            "main.pdf",
+            "main.nav",
+            "main.snm",
+            "main.vrb",
+            "main.lot",
+            "main.idx",
+            "main.ind",
+            "main.dvi",
+            "acs-main.bib",
+            "main-blx.bib",
+            "_minted-main/default.pygstyle",
+            "svg-inkscape/plot_svg-tex.pdf",
+            ".vscode/settings.json",
+        ] {
+            std::fs::write(root.join(file), "").unwrap();
+        }
+        let mut names: Vec<String> = project_files(&root)
+            .iter()
+            .map(|entry| match entry {
+                Entry::File { name, .. } => name.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
+        names.sort();
+        assert_eq!(names, ["figure.pdf", "main.tex", "refs.bib"]);
     }
 
     #[cfg(unix)]
