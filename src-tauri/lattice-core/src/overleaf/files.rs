@@ -230,7 +230,8 @@ pub(super) fn is_excluded(path: &str) -> bool {
         // A half-written `(busy)` artifact caught mid-compile would otherwise
         // live on Overleaf and in the project's history forever.
         || is_build_output(path)
-        // minted's or the svg package's compile cache, which Overleaf writes again.
+        // A package's compile cache (minted, svg, pythontex, markdown), which
+        // Overleaf writes again.
         || crate::util::in_package_cache_folder(path)
 }
 
@@ -535,6 +536,7 @@ mod tests {
             ("main.tex", false),
             ("nested/chapter.tex", false),
             ("chapters/_minted-main/default.pygstyle", true),
+            ("pythontex-files-main/main.pytxmcr", true),
             ("_minted_snippets/hello.py", false),
             // Conflict copies are ours to hold locally, never the project's.
             ("neurips_2026 (local conflict 20260724-1308).tex", true),

@@ -30,21 +30,31 @@ pub(crate) fn is_atomic_write_temporary(name: &str) -> bool {
         .is_some_and(|id| uuid::Uuid::try_parse(id).is_ok())
 }
 
-/// Whether `relative` (forward slashes) is in a folder a package fills while
-/// compiling, through a program it runs with shell escape: minted's
-/// `_minted` / `_minted-<jobname>`, the svg package's `svg-inkscape`. TeX's
-/// output directory never reaches it, so it lands beside the sources; the
+/// Whether `relative` (forward slashes) is a file inside a folder a package
+/// fills while compiling: minted's `_minted` / `_minted-<jobname>`, the svg
+/// package's `svg-inkscape`, pythontex's `pythontex-files-<jobname>` or the
+/// markdown package's `_markdown_<jobname>`. What fills it does not follow
+/// TeX's output directory (markdown does on TeX Live 2024 and later, unless
+/// the build runs beside its sources), so it lands beside the sources; the
 /// tree hides it, Overleaf sync leaves it out and a project's `.gitignore`
-/// names it (`build_artifact_ignore_lines`). Exact names only: a
-/// writer's `_minted_snippets/` is a source. Never deleted as build output,
-/// since a project may keep it on purpose (minted's `frozencache`).
+/// names it (`build_artifact_ignore_lines`). Only folders count: a writer's
+/// `_markdown_intro.tex` is a source, as is a `_minted_snippets/` folder.
+/// Never deleted as build output, since a project may keep it on purpose
+/// (minted's `frozencache`, markdown's `frozenCache.tex`).
 pub(crate) fn in_package_cache_folder(relative: &str) -> bool {
-    relative.split('/').any(|name| {
-        name == "svg-inkscape"
-            || name
-                .strip_prefix("_minted")
-                .is_some_and(|rest| rest.is_empty() || (rest.len() > 1 && rest.starts_with('-')))
-    })
+    relative
+        .rsplit_once('/')
+        .is_some_and(|(folders, _)| folders.split('/').any(is_package_cache_folder_name))
+}
+
+/// Whether a folder named `name` is one [`in_package_cache_folder`] names.
+pub(crate) fn is_package_cache_folder_name(name: &str) -> bool {
+    name == "svg-inkscape"
+        || name
+            .strip_prefix("_minted")
+            .is_some_and(|rest| rest.is_empty() || (rest.len() > 1 && rest.starts_with('-')))
+        || name.starts_with("pythontex-files-")
+        || name.starts_with("_markdown_")
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
@@ -270,16 +280,25 @@ mod tests {
     #[test]
     fn package_cache_folders_are_matched_by_exact_name_at_any_depth() {
         for (path, cache) in [
-            ("_minted", true),
             ("_minted-main/default.pygstyle", true),
             ("chapters/_minted-intro/0A1B2C.pygtex", true),
+            ("_minted/0A1B2C.pygtex", true),
             ("figures/svg-inkscape/plot_svg-tex.pdf", true),
+            ("pythontex-files-main/main.pytxmcr", true),
+            ("chapters/_markdown_main/0123abcd.md", true),
             ("_minted_snippets/hello.py", false),
-            ("_minted_listing.tex", false),
             ("_minted-/stray.tex", false),
             ("svg-inkscape-notes/readme.md", false),
+            ("pythontex-files.tex", false),
+            // A file named like a cache folder is a writer's own.
+            ("_minted_listing.tex", false),
+            ("_markdown_intro.tex", false),
+            ("chapters/pythontex-files-notes.txt", false),
         ] {
             assert_eq!(in_package_cache_folder(path), cache, "{path}");
+        }
+        for (name, cache) in [("_minted", true), ("_markdown_main", true), ("_markdown", false)] {
+            assert_eq!(is_package_cache_folder_name(name), cache, "{name}");
         }
     }
 }

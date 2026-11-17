@@ -575,6 +575,8 @@ mod tests {
             "_minted/",
             "_minted-*/",
             "svg-inkscape/",
+            "pythontex-files-*/",
+            "_markdown_*/",
             ".research/review/",
             ".research/build/",
             "node_modules/",

@@ -65,7 +65,10 @@ pub(super) fn build_artifact_ignore_lines() -> impl Iterator<Item = String> {
         .chain(["*.synctex(busy)", "*.synctex.gz(busy)", "*-SAVE-ERROR"].map(String::from))
         // The package cache folders `crate::util::in_package_cache_folder`
         // names, at any depth: rewritten by every build that uses them.
-        .chain(["_minted/", "_minted-*/", "svg-inkscape/"].map(String::from))
+        .chain(
+            ["_minted/", "_minted-*/", "svg-inkscape/", "pythontex-files-*/", "_markdown_*/"]
+                .map(String::from),
+        )
 }
 
 /// Extensions of the stale outputs a moved `.tex` file leaves behind. Spelled
@@ -276,6 +279,8 @@ fn exclusion_reason(relative: &Path, name: &str, path: &Path) -> Option<&'static
     }
     if is_build_artifact(path)
         || crate::util::in_package_cache_folder(&normalized)
+        // The cache folder itself; the name check first spares a stat.
+        || (crate::util::is_package_cache_folder_name(name) && path.is_dir())
         || name.ends_with('~')
         || name.ends_with(".swp")
         || name.ends_with(".tmp")
@@ -669,12 +674,17 @@ mod tests {
             // Neither a human's .xml nor a user file containing `(busy)` is an artifact.
             ("data.xml", "<rows/>"),
             ("notes(busy)", "notes"),
+            // A package's cache folder hides; a file named like one does not.
+            ("pythontex-files-main/main.pytxmcr", "macros"),
+            ("_markdown_main/0123abcd.md", "cache"),
+            ("_markdown_intro.tex", "source"),
         ] {
             fixture.write(name, contents);
         }
         // `open` is the desktop's refresh_project entry point.
         let files = open(&fixture.root).unwrap().files;
         let visible = [
+            "_markdown_intro.tex",
             "acs-refs.bib",
             "data.xml",
             "main.tex",
