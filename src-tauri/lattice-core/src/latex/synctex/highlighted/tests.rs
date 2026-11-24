@@ -298,3 +298,12 @@ fn a_package_of_the_project_may_declare_the_environment() {
     let found = blocks(HIGHLIGHTED, 3, sources, &["\\newminted{python}{}"]);
     assert_eq!(found.into_iter().map(|block| block.line).collect::<Vec<_>>(), [8]);
 }
+
+#[test]
+fn the_start_of_a_longer_block_is_not_the_block() {
+    let longer = MAIN.replace("print(\"\\n\")\n", "print(\"\\n\")\nprint(1)\n");
+    assert_eq!(find(3, &[("main.tex", &longer)]), []);
+    // Blank lines before its end are the block's own.
+    let spaced = MAIN.replace("print(\"\\n\")\n", "print(\"\\n\")\n\n\n");
+    assert_eq!(find(3, &[("main.tex", &spaced)]), [("main.tex", 8)]);
+}

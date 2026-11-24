@@ -199,7 +199,14 @@ fn blocks<P: Clone>(
         let source: Vec<&str> = source.lines().collect();
         let text: Vec<String> = source.iter().map(|text| code_text(text)).collect();
         for (start, run) in text.windows(code.len()).enumerate() {
-            if run == code.as_slice() && opens_minted(&source[..start], &environments) {
+            // The block's whole code, not the start of a longer block's: the
+            // environment ends after it (past any blank lines Pygments dropped).
+            let closes = || {
+                let after =
+                    source[start + code.len()..].iter().find(|text| !text.trim().is_empty());
+                after.is_some_and(|text| text.trim_start().starts_with("\\end{"))
+            };
+            if run == code.as_slice() && opens_minted(&source[..start], &environments) && closes() {
                 let start = start as u32 + 1;
                 found.push(Block { path: path.clone(), start, line: start + offset as u32 });
             }
