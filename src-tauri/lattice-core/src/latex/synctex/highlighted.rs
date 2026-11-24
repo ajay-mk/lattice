@@ -37,16 +37,24 @@ pub(super) fn source(
         (path.starts_with(root) && !generated(&path)).then_some(path)
     };
     let mut seen = HashSet::new();
-    let sources: Vec<(PathBuf, String)> = input_names(synctex)
+    let read: Vec<(PathBuf, String)> = input_names(synctex)
         .filter_map(project_source)
-        .filter(|path| {
-            path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
-                && seen.insert(path.clone())
-        })
+        .filter(|path| seen.insert(path.clone()))
         .filter_map(|path| Some((path.clone(), fs::read_to_string(&path).ok()?)))
         .collect();
+    let extension = |path: &Path, wanted: &[&str]| {
+        path.extension().is_some_and(|extension| {
+            wanted.iter().any(|wanted| extension.eq_ignore_ascii_case(wanted))
+        })
+    };
+    let (sources, packages): (Vec<_>, Vec<_>) = read
+        .into_iter()
+        .filter(|(path, _)| extension(path, &["tex", "sty", "cls"]))
+        .partition(|(path, _)| extension(path, &["tex"]));
+    // A package of the project's may declare the environments too.
+    let packages: Vec<&str> = packages.iter().map(|(_, text)| text.as_str()).collect();
     let blocks = fs::read_to_string(input)
-        .map(|highlighted| blocks(&highlighted, line, sources.iter().cloned()))
+        .map(|highlighted| blocks(&highlighted, line, sources.iter().cloned(), &packages))
         .unwrap_or_default();
     if blocks.is_empty() {
         let (name, line, _) =
@@ -166,9 +174,10 @@ struct Block<P> {
 /// Every minted environment in `sources` (path and text, in order) holding
 /// the code of `highlighted`, a minted cache file, with its line `line`'s
 /// place in it. Empty when none does: an `\inputminted` file, code `gobble`
-/// changed, or a source edited since the build.
+/// changed, or a source edited since the build. `packages` (the project's
+/// `.sty` and `.cls`) may declare minted environments too.
 fn blocks<P: Clone>(
-    highlighted: &str, line: u32, sources: impl IntoIterator<Item = (P, String)>,
+    highlighted: &str, line: u32, sources: impl IntoIterator<Item = (P, String)>, packages: &[&str],
 ) -> Vec<Block<P>> {
     let lines: Vec<&str> = highlighted.lines().collect();
     // Pygments wraps the block in a verbatim environment (`Verbatim`, minted
@@ -184,7 +193,9 @@ fn blocks<P: Clone>(
     }
     let offset = (line as usize).saturating_sub(begin + 1).min(code.len() - 1);
     let sources: Vec<(P, String)> = sources.into_iter().collect();
-    let environments = minted_environments(sources.iter().map(|(_, text)| text.as_str()));
+    let environments = minted_environments(
+        sources.iter().map(|(_, text)| text.as_str()).chain(packages.iter().copied()),
+    );
     let mut found = Vec::new();
     for (path, source) in sources {
         let source: Vec<&str> = source.lines().collect();
@@ -205,20 +216,45 @@ fn blocks<P: Clone>(
 /// starred form.
 fn minted_environments<'a>(sources: impl Iterator<Item = &'a str>) -> HashSet<String> {
     let mut names = HashSet::from(["minted".to_string()]);
+    let mut add = |name: &str| {
+        let name = name.trim();
+        if !name.is_empty() {
+            names.insert(format!("{name}*"));
+            names.insert(name.to_string());
+        }
+    };
     for source in sources {
-        for line in source.lines().map(uncommented) {
-            for rest in line.split("\\newminted").skip(1) {
-                let rest = rest.trim_start();
-                let name = match rest.strip_prefix('[') {
-                    Some(rest) => rest.split(']').next().map(str::to_string),
-                    None => rest
-                        .strip_prefix('{')
-                        .and_then(|rest| rest.split('}').next())
-                        .map(|language| format!("{}code", language.trim())),
+        // A declaration may run over lines, but not into a comment.
+        let source: String = source.lines().map(uncommented).collect::<Vec<_>>().join("\n");
+        for rest in source.split("\\newminted").skip(1) {
+            let rest = rest.trim_start();
+            match rest.strip_prefix('[') {
+                Some(rest) => add(rest.split(']').next().unwrap_or_default()),
+                None => {
+                    let language = rest.strip_prefix('{').and_then(|rest| rest.split('}').next());
+                    if let Some(language) = language {
+                        add(&format!("{}code", language.trim()));
+                    }
+                }
+            }
+        }
+        // An environment of the document's own that opens one around its
+        // body: `\newenvironment{code}{\begin{minted}{python}}{\end{minted}}`.
+        for command in [
+            "\\newenvironment",
+            "\\renewenvironment",
+            "\\NewDocumentEnvironment",
+            "\\RenewDocumentEnvironment",
+        ] {
+            for rest in source.split(command).skip(1) {
+                let Some((name, definition)) =
+                    rest.trim_start().strip_prefix('{').and_then(|rest| rest.split_once('}'))
+                else {
+                    continue;
                 };
-                if let Some(name) = name.map(|name| name.trim().to_string()) {
-                    names.insert(format!("{name}*"));
-                    names.insert(name);
+                let definition = definition.split(command).next().unwrap_or_default();
+                if definition.contains("\\begin{minted}") {
+                    add(name);
                 }
             }
         }
@@ -255,7 +291,14 @@ fn opens_minted(above: &[&str], environments: &HashSet<String>) -> bool {
 /// (`d = {}`) or more of a macro (`\newcommand\x{\begin{minted}{c}}`).
 fn only_groups(text: &str) -> bool {
     let mut closing = Vec::new();
+    // A new line may go on only inside a group (options over lines): one
+    // that starts after every group closed is code, even all brackets (`[]`).
+    let mut line_ended = false;
     for character in text.chars() {
+        if line_ended && closing.is_empty() && !character.is_whitespace() {
+            return false;
+        }
+        line_ended |= character == '\n' && closing.is_empty();
         match character {
             '[' | '{' if closing.is_empty() => {
                 closing.push(if character == '[' { ']' } else { '}' })

@@ -14,7 +14,10 @@ Before.\n\n\\begin{minted}{python}\ndef f(x):\n    return x + 1\n\nprint(\"\\n\"
 
 fn find(line: u32, sources: &[(&'static str, &str)]) -> Vec<(&'static str, u32)> {
     let sources = sources.iter().map(|(path, text)| (*path, text.to_string()));
-    blocks(HIGHLIGHTED, line, sources).into_iter().map(|block| (block.path, block.line)).collect()
+    blocks(HIGHLIGHTED, line, sources, &[])
+        .into_iter()
+        .map(|block| (block.path, block.line))
+        .collect()
 }
 
 #[test]
@@ -246,4 +249,35 @@ fn only_options_and_arguments_may_follow_the_opening() {
     assert!(!opens(&["\\begin{minted}{python}", "xs = [1, 2]"]));
     assert!(!opens(&["\\begin{minted}{c}", "int f() {", "}"]));
     assert!(!opens(&["\\newcommand\\x{\\begin{minted}{python}}"]));
+}
+
+#[test]
+fn a_bracket_line_of_another_block_is_not_an_opening() {
+    let environments = minted_environments(
+        [
+            "\\newminted\n  {rust}{}",
+            "\\newenvironment{snippet}\n  {\\VerbatimEnvironment\\begin{minted}{python}}\n  {\\end{minted}}",
+            "\\newenvironment{plain}{\\begin{verbatim}}{\\end{verbatim}}",
+        ]
+        .into_iter(),
+    );
+    // Declarations over lines, and an environment wrapping minted.
+    assert!(environments.contains("rustcode") && environments.contains("snippet"));
+    assert!(!environments.contains("plain"));
+    let opens = |above: &[&str]| opens_minted(above, &environments);
+    // Code all brackets, one line into a block, opens nothing.
+    assert!(!opens(&["\\begin{minted}{json}", "[]"]));
+    assert!(!opens(&["\\begin{minted}{json}", "[", "]"]));
+    assert!(!opens(&["\\begin{minted}{json}", "{}", ""]));
+    // Options over lines, and blank lines before the code, still do.
+    assert!(opens(&["\\begin{minted}[", "  frame={lines},", "]{json}", "", ""]));
+    assert!(opens(&["\\begin{snippet}"]));
+}
+
+#[test]
+fn a_package_of_the_project_may_declare_the_environment() {
+    let sources = [("main.tex", MAIN.replace("\\begin{minted}{python}", "\\begin{pythoncode}"))];
+    assert_eq!(blocks(HIGHLIGHTED, 3, sources.clone(), &[]), []);
+    let found = blocks(HIGHLIGHTED, 3, sources, &["\\newminted{python}{}"]);
+    assert_eq!(found.into_iter().map(|block| block.line).collect::<Vec<_>>(), [8]);
 }
