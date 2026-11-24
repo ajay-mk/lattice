@@ -35,15 +35,30 @@ fn only_a_minted_environment_holding_the_same_code_is_its_block() {
     assert_eq!(find(3, &sources), [("main.tex", 8)]);
     // Code no source holds is not guessed at.
     assert_eq!(find(3, &[("chapter.tex", chapter.as_str())]), []);
-    // The same code in a comment, a verbatim copy or lstlisting is not a block;
-    // in an environment `\newminted` made, it is.
-    for (open, block) in
-        [("%", false), ("\\begin{verbatim}", false), ("\\begin{lstlisting}", false)]
-            .into_iter()
-            .chain([("\\begin{pythoncode*}{linenos}", true)])
-    {
-        let copy = MAIN.replace("\\begin{minted}{python}", open);
-        let expected: &[(&str, u32)] = if block { &[("main.tex", 8)] } else { &[] };
+    // The same code in a comment, a verbatim copy, lstlisting or another
+    // environment named `…code` is not a block; in one `\newminted` declared,
+    // or a `minted` whose options run over lines, it is.
+    for (open, block) in [
+        ("%", false),
+        ("\\begin{verbatim}", false),
+        ("\\begin{lstlisting}", false),
+        ("\\begin{code}", false),
+        ("\\begin{sourcecode}", false),
+        ("% \\begin{minted}{python}", false),
+        ("\\begin{minted}{python}\\end{minted}", false),
+        ("\\begin{pythoncode*}{linenos}", true),
+        ("\\begin{py}", true),
+        ("\\begin{minted}[% options\n  linenos,\n]{python}", true),
+    ] {
+        let copy = MAIN
+            .replace(
+                "\\usepackage{minted}",
+                "\\usepackage{minted}\\newminted{python}{}\\newminted[py]{python}{}",
+            )
+            .replace("\\begin{minted}{python}\n", &format!("{open}\n"));
+        // An opening over more lines moves the code down.
+        let lines = open.matches('\n').count() as u32;
+        let expected: &[(&str, u32)] = if block { &[("main.tex", 8 + lines)] } else { &[] };
         assert_eq!(find(3, &[("main.tex", &copy)]), expected, "{open}");
     }
 }
@@ -139,4 +154,96 @@ fn a_click_lands_on_the_block_tex_read_at_that_point() {
     assert_eq!(at("_minted/D.highlight.minted", 2, 400.0), Some(("main.tex".into(), 22)));
     // Any other input is not this lookup's.
     assert_eq!(at("main.tex", 4, 150.0), None);
+}
+
+#[test]
+fn a_comment_starts_at_a_percent_sign_no_backslash_escapes() {
+    assert_eq!(uncommented("50\\% done % really"), "50\\% done ");
+    assert_eq!(uncommented("a\\\\% comment"), "a\\\\");
+    assert_eq!(uncommented("no comment"), "no comment");
+}
+
+/// The blocks of `blocks`, as file names and lines, in the order
+/// `reading_order` gives them.
+fn read_in_order(files: &[(&str, &str)]) -> Vec<(String, u32)> {
+    let parent = TempDir::new("synctex-reading-order");
+    for (name, text) in files {
+        parent.write(name, text);
+    }
+    let root = parent.join("project");
+    let sources: Vec<(PathBuf, String)> = files
+        .iter()
+        .filter(|(name, _)| name.starts_with("project/"))
+        .map(|(name, text)| (parent.join(name).canonicalize().unwrap(), text.to_string()))
+        .collect();
+    let block = "\\begin{minted}{python}\ndef f(x):\n    return x + 1\n\\end{minted}\n";
+    let blocks: Vec<Block<PathBuf>> = sources
+        .iter()
+        .flat_map(|(path, text)| {
+            let starts: Vec<u32> = text
+                .match_indices(block)
+                .map(|(at, _)| text[..at].lines().count() as u32 + 2)
+                .collect();
+            starts.into_iter().map(move |start| Block { path: path.clone(), start, line: start })
+        })
+        .collect();
+    let root = root.canonicalize().unwrap();
+    reading_order(&sources, &blocks)
+        .into_iter()
+        .map(|block| (block.path.strip_prefix(&root).unwrap().display().to_string(), block.start))
+        .collect()
+}
+
+#[test]
+fn reads_sources_where_they_are_included_once_each_time() {
+    let block = "\\begin{minted}{python}\ndef f(x):\n    return x + 1\n\\end{minted}\n";
+    let order = read_in_order(&[
+        ("project/main.tex", &format!("{block}\\input{{ch.v2}}\n\\input{{ch.v2}} % twice\n\\input{{../outside}}\n\\input{{main}}\n{block}")),
+        // `ch.v2` is `ch.v2.tex`, never `ch.tex`; a file inputting itself ends.
+        ("project/ch.v2.tex", &format!("\\input{{ch.v2}}\n{block}")),
+        ("project/ch.tex", block),
+        // Outside the project: not a source, so not read.
+        ("outside.tex", block),
+    ]);
+    assert_eq!(
+        order,
+        [
+            ("main.tex".into(), 2),
+            ("ch.v2.tex".into(), 3),
+            ("ch.v2.tex".into(), 3),
+            ("main.tex".into(), 10),
+            // Never included: after the rest.
+            ("ch.tex".into(), 2),
+        ]
+    );
+}
+
+#[test]
+fn a_chain_of_files_each_included_twice_is_read_a_bounded_number_of_times() {
+    let files: Vec<(String, String)> = (0..20)
+        .map(|index| {
+            let next = format!("\\input{{f{}}}\n", index + 1);
+            (format!("project/f{index}.tex"), next.repeat(2))
+        })
+        .collect();
+    let mut files: Vec<(&str, &str)> =
+        files.iter().map(|(name, text)| (name.as_str(), text.as_str())).collect();
+    files.insert(0, ("project/main.tex", "\\input{f0}\n"));
+    // 2^20 reads unbounded; this returns at once.
+    assert_eq!(read_in_order(&files), []);
+}
+
+#[test]
+fn only_options_and_arguments_may_follow_the_opening() {
+    let environments = minted_environments(["\\newminted { js }{}"].into_iter());
+    assert!(environments.contains("jscode"));
+    let opens = |above: &[&str]| opens_minted(above, &environments);
+    assert!(opens(&["\\begin{minted}{python}"]));
+    assert!(opens(&["\\begin{minted}[", "  linenos, frame={lines},", "]{python}", ""]));
+    assert!(opens(&["\\begin{jscode*}{linenos} % options"]));
+    // A line of code ending in a bracket is code, not an option.
+    assert!(!opens(&["\\begin{minted}{python}", "d = {}"]));
+    assert!(!opens(&["\\begin{minted}{python}", "xs = [1, 2]"]));
+    assert!(!opens(&["\\begin{minted}{c}", "int f() {", "}"]));
+    assert!(!opens(&["\\newcommand\\x{\\begin{minted}{python}}"]));
 }
