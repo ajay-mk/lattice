@@ -175,16 +175,14 @@ pub(super) fn corrections(synctex: &str, page: u32) -> Vec<Correction> {
 /// around it, the nearest record with a line.
 ///
 /// Only inputs `counts` keeps answer (by the name SyncTeX recorded). Also
-/// answers which time TeX opened that input, from 0: an input read again
-/// (`\input` twice, minted's file for two blocks of the same code) is
-/// declared again, under a new tag.
+/// answers the input's tag: an input TeX reads again (minted's file for two
+/// blocks of the same code) is declared again, under a new tag.
 pub(super) fn source_at(
     synctex: &str, page: u32, (x, y): (f64, f64), counts: impl Fn(&str) -> bool,
-) -> Option<(String, u32, usize)> {
+) -> Option<(String, u32, u32)> {
     let (page_open, page_close) = (format!("{{{page}"), format!("}}{page}"));
     let mut scale = Scale::default();
     let mut inputs = HashMap::new();
-    let mut opened: HashMap<&str, usize> = HashMap::new();
     let mut in_page = false;
     let mut depth = 0_usize;
     let mut best: Option<(Rank, u32, u32)> = None;
@@ -193,9 +191,7 @@ pub(super) fn source_at(
             record.strip_prefix("Input:").and_then(|rest| rest.split_once(':'))
         {
             if let Some(tag) = tag.parse::<u32>().ok().filter(|_| counts(path)) {
-                let time = opened.entry(path).or_default();
-                inputs.insert(tag, (path, *time));
-                *time += 1;
+                inputs.insert(tag, path);
             }
             continue;
         }
@@ -226,8 +222,7 @@ pub(super) fn source_at(
         }
     }
     let (_, tag, line) = best?;
-    let (path, time) = inputs.get(&tag)?;
-    Some((path.to_string(), line, *time))
+    Some((inputs.get(&tag)?.to_string(), line, tag))
 }
 
 /// The last page holding anything TeX recorded from a line `before` keeps:
