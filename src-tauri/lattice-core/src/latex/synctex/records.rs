@@ -173,10 +173,18 @@ pub(super) fn corrections(synctex: &str, page: u32) -> Vec<Correction> {
 /// box around it still carries the `\includegraphics` line. So: the tightest
 /// box with a line around the point, the innermost of equal ones; with none
 /// around it, the nearest record with a line.
-pub(super) fn source_at(synctex: &str, page: u32, (x, y): (f64, f64)) -> Option<(String, u32)> {
+///
+/// Only inputs `counts` keeps answer (by the name SyncTeX recorded). Also
+/// answers which time TeX opened that input, from 0: an input read again
+/// (`\input` twice, minted's file for two blocks of the same code) is
+/// declared again, under a new tag.
+pub(super) fn source_at(
+    synctex: &str, page: u32, (x, y): (f64, f64), counts: impl Fn(&str) -> bool,
+) -> Option<(String, u32, usize)> {
     let (page_open, page_close) = (format!("{{{page}"), format!("}}{page}"));
     let mut scale = Scale::default();
     let mut inputs = HashMap::new();
+    let mut opened: HashMap<&str, usize> = HashMap::new();
     let mut in_page = false;
     let mut depth = 0_usize;
     let mut best: Option<(Rank, u32, u32)> = None;
@@ -184,8 +192,10 @@ pub(super) fn source_at(synctex: &str, page: u32, (x, y): (f64, f64)) -> Option<
         if let Some((tag, path)) =
             record.strip_prefix("Input:").and_then(|rest| rest.split_once(':'))
         {
-            if let Ok(tag) = tag.parse::<u32>() {
-                inputs.insert(tag, path);
+            if let Some(tag) = tag.parse::<u32>().ok().filter(|_| counts(path)) {
+                let time = opened.entry(path).or_default();
+                inputs.insert(tag, (path, *time));
+                *time += 1;
             }
             continue;
         }
@@ -216,7 +226,8 @@ pub(super) fn source_at(synctex: &str, page: u32, (x, y): (f64, f64)) -> Option<
         }
     }
     let (_, tag, line) = best?;
-    Some((inputs.get(&tag)?.to_string(), line))
+    let (path, time) = inputs.get(&tag)?;
+    Some((path.to_string(), line, *time))
 }
 
 /// The last page holding anything TeX recorded from a line `before` keeps:

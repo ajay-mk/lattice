@@ -1,5 +1,6 @@
 //! SyncTeX lookups between the compiled PDF and its sources.
 
+mod highlighted;
 mod records;
 
 use super::aux_files;
@@ -8,7 +9,9 @@ use crate::commands;
 use crate::latex::PdfSyncTarget;
 use crate::models::SyncTexTarget;
 use crate::project;
+use crate::util;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -43,16 +46,26 @@ pub fn inverse_search_in(
     // that placed it, or failing that the nearest one that has a line.
     let pdf = root.join(&pdf);
     let synctex = read_map(root, &document);
-    let (input, line) = parse_synctex_edit(&output)
+    let (input, mut line) = parse_synctex_edit(&output)
         .or_else(|| {
-            synctex.as_deref().and_then(|synctex| records::source_at(synctex, page, (x, y)))
+            synctex
+                .as_deref()
+                .and_then(|synctex| records::source_at(synctex, page, (x, y), |_| true))
+                .map(|(input, line, _)| (input, line))
         })
         .ok_or_else(|| "No LaTeX source was found for this PDF position.".to_string())?;
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
-    let canonical_input = Inputs::new(synctex.as_deref(), &pdf)
-        .path(&input)
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
+    let inputs = Inputs::new(synctex.as_deref(), &pdf);
+    let mut canonical_input =
+        inputs.path(&input).canonicalize().map_err(|error| error.to_string())?;
+    // Code minted highlighted is typeset from the file it generated for it,
+    // so that is the file SyncTeX names, which the writer never edits.
+    if let Some((source, source_line)) = synctex.as_deref().and_then(|synctex| {
+        highlighted_source(synctex, &inputs, &canonical_root, &canonical_input, line, page, (x, y))
+    }) {
+        canonical_input = source;
+        line = source_line;
+    }
     let relative = canonical_input
         .strip_prefix(&canonical_root)
         .map_err(|_| "SyncTeX returned a source file outside this project.".to_string())?;
@@ -70,6 +83,55 @@ pub fn inverse_search_in(
     let line =
         fs::read_to_string(&canonical_input).map_or(line, |source| paragraph_line(&source, line));
     Ok(SyncTexTarget { path: relative.to_string_lossy().replace('\\', "/"), line })
+}
+
+/// Where the writer wrote what `input` (canonical), a file a package
+/// generated in its cache folder, typeset at line `line` and the point
+/// `(x, y)` of `page`: the code minted highlighted into it, found in the
+/// project's `.tex` sources, else the nearest place on the page TeX recorded
+/// a source of the project at. `None` for any other input.
+fn highlighted_source(
+    synctex: &str, inputs: &Inputs, root: &Path, input: &Path, line: u32, page: u32,
+    point: (f64, f64),
+) -> Option<(PathBuf, u32)> {
+    let generated = |path: &Path| {
+        path.strip_prefix(root).is_ok_and(|relative| {
+            util::in_package_cache_folder(&relative.to_string_lossy().replace('\\', "/"))
+        })
+    };
+    if !generated(input) {
+        return None;
+    }
+    let project_source = |name: &str| {
+        let path = inputs.path(name).canonicalize().ok()?;
+        (path.starts_with(root) && !generated(&path)).then_some(path)
+    };
+    let mut seen = HashSet::new();
+    let sources = input_names(synctex).filter_map(project_source).filter(|path| {
+        path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("tex"))
+            && seen.insert(path.clone())
+    });
+    let texts = sources.filter_map(|path| Some((path.clone(), fs::read_to_string(&path).ok()?)));
+    let mut found = fs::read_to_string(input)
+        .map(|highlighted| highlighted::source_lines(&highlighted, line, texts))
+        .unwrap_or_default();
+    // Code blocks first: the same text can be a comment or an equation too.
+    found.sort_by_key(|(.., opened)| !opened);
+    // minted names its file by the code, so blocks of the same code share it,
+    // and TeX opens it once for each: the block clicked is the one TeX read
+    // that time (in the order the sources hold them).
+    let time = records::source_at(synctex, page, point, |name| {
+        inputs.path(name).canonicalize().is_ok_and(|path| path == input)
+    })
+    .map_or(0, |(.., time)| time);
+    let blocks = found.iter().filter(|(.., opened)| *opened).count();
+    let pick = if time < blocks { time } else { 0 };
+    if let Some((path, line, _)) = found.into_iter().nth(pick) {
+        return Some((path, line));
+    }
+    let (name, line, _) =
+        records::source_at(synctex, page, point, |name| project_source(name).is_some())?;
+    Some((project_source(&name)?, line))
 }
 
 /// The 1-based `line` of `source`, moved off a blank line onto the nearest
