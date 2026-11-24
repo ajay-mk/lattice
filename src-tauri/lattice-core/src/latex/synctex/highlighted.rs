@@ -37,19 +37,17 @@ pub(super) fn source(
         (path.starts_with(root) && !generated(&path)).then_some(path)
     };
     let mut seen = HashSet::new();
-    let read: Vec<(PathBuf, String)> = input_names(synctex)
-        .filter_map(project_source)
-        .filter(|path| seen.insert(path.clone()))
-        .filter_map(|path| Some((path.clone(), fs::read_to_string(&path).ok()?)))
-        .collect();
     let extension = |path: &Path, wanted: &[&str]| {
         path.extension().is_some_and(|extension| {
             wanted.iter().any(|wanted| extension.eq_ignore_ascii_case(wanted))
         })
     };
-    let (sources, packages): (Vec<_>, Vec<_>) = read
-        .into_iter()
-        .filter(|(path, _)| extension(path, &["tex", "sty", "cls"]))
+    // Only what can hold a block or declare one: not the `.aux`, `.bbl` or
+    // figures TeX also read.
+    let (sources, packages): (Vec<_>, Vec<_>) = input_names(synctex)
+        .filter_map(project_source)
+        .filter(|path| extension(path, &["tex", "sty", "cls"]) && seen.insert(path.clone()))
+        .filter_map(|path| Some((path.clone(), fs::read_to_string(&path).ok()?)))
         .partition(|(path, _)| extension(path, &["tex"]));
     // A package of the project's may declare the environments too.
     let packages: Vec<&str> = packages.iter().map(|(_, text)| text.as_str()).collect();
@@ -247,19 +245,49 @@ fn minted_environments<'a>(sources: impl Iterator<Item = &'a str>) -> HashSet<St
             "\\RenewDocumentEnvironment",
         ] {
             for rest in source.split(command).skip(1) {
+                let rest = rest.strip_prefix('*').unwrap_or(rest);
                 let Some((name, definition)) =
                     rest.trim_start().strip_prefix('{').and_then(|rest| rest.split_once('}'))
                 else {
                     continue;
                 };
-                let definition = definition.split(command).next().unwrap_or_default();
-                if definition.contains("\\begin{minted}") {
+                // Only its own begin and end code (and a document command's
+                // argument specification): never what follows it.
+                let parts = if command.contains("Document") { 3 } else { 2 };
+                if groups(definition, parts).iter().any(|group| group.contains("\\begin{minted}")) {
                     add(name);
                 }
             }
         }
     }
     names
+}
+
+/// The first `count` brace groups of `text`, past whitespace and the
+/// `[…]` groups before them (an environment's argument count and default).
+fn groups(text: &str, count: usize) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while found.len() < count {
+        rest = rest.trim_start();
+        let (open, close) = match rest.chars().next() {
+            Some('{') => ('{', '}'),
+            Some('[') => ('[', ']'),
+            _ => break,
+        };
+        let mut depth = 0;
+        let Some(end) = rest.char_indices().find_map(|(index, character)| {
+            depth += i32::from(character == open) - i32::from(character == close);
+            (depth == 0).then_some(index)
+        }) else {
+            break;
+        };
+        if open == '{' {
+            found.push(&rest[1..end]);
+        }
+        rest = &rest[end + 1..];
+    }
+    found
 }
 
 /// Whether the source lines `above` a run of code end by opening one of
@@ -274,7 +302,12 @@ fn opens_minted(above: &[&str], environments: &HashSet<String>) -> bool {
         .iter()
         .rev()
         .take(OPENING_LINES)
-        .map(|line| uncommented(line))
+        // A whole line of comment is one inside the options, or a line of
+        // code (`% setup` in MATLAB): never a blank line.
+        .map(|line| match uncommented(line) {
+            text if text.trim().is_empty() && !line.trim().is_empty() => "\u{1}",
+            text => text,
+        })
         .collect::<Vec<_>>()
         .into_iter()
         .rev()

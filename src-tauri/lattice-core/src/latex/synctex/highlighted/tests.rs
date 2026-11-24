@@ -223,17 +223,26 @@ fn reads_sources_where_they_are_included_once_each_time() {
 
 #[test]
 fn a_chain_of_files_each_included_twice_is_read_a_bounded_number_of_times() {
-    let files: Vec<(String, String)> = (0..20)
-        .map(|index| {
-            let next = format!("\\input{{f{}}}\n", index + 1);
-            (format!("project/f{index}.tex"), next.repeat(2))
+    let parent = TempDir::new("synctex-reading-bound");
+    parent.write("main.tex", "\\input{f0}\n");
+    for index in 0..20 {
+        parent.write(&format!("f{index}.tex"), format!("\\input{{f{}}}\n", index + 1).repeat(2));
+    }
+    let sources: Vec<(PathBuf, String)> = ["main".to_string()]
+        .into_iter()
+        .chain((0..20).map(|index| format!("f{index}")))
+        .map(|name| {
+            let path = parent.join(format!("{name}.tex")).canonicalize().unwrap();
+            let text = fs::read_to_string(&path).unwrap();
+            (path, text)
         })
         .collect();
-    let mut files: Vec<(&str, &str)> =
-        files.iter().map(|(name, text)| (name.as_str(), text.as_str())).collect();
-    files.insert(0, ("project/main.tex", "\\input{f0}\n"));
-    // 2^20 reads unbounded; this returns at once.
-    assert_eq!(read_in_order(&files), []);
+    let folder = sources[0].0.parent().unwrap().to_path_buf();
+    let mut reading =
+        Reading { folder: &folder, sources: &sources, blocks: &[], open: Vec::new(), reads: 0 };
+    reading.read(&sources[0].0, &mut Vec::new());
+    // Unbounded, 2^21 - 1 reads.
+    assert_eq!(reading.reads, Reading::MOST_READS);
 }
 
 #[test]
@@ -256,15 +265,23 @@ fn a_bracket_line_of_another_block_is_not_an_opening() {
     let environments = minted_environments(
         [
             "\\newminted\n  {rust}{}",
-            "\\newenvironment{snippet}\n  {\\VerbatimEnvironment\\begin{minted}{python}}\n  {\\end{minted}}",
-            "\\newenvironment{plain}{\\begin{verbatim}}{\\end{verbatim}}",
+            "\\newenvironment*{snippet}[1][x]\n  {\\VerbatimEnvironment\\begin{minted}{python}}\n  {\\end{minted}}",
+            "\\NewDocumentEnvironment{listing}{m}{\\begin{minted}{#1}}{\\end{minted}}",
+            // A minted block after a definition is not part of it.
+            "\\newenvironment{plain}{\\begin{verbatim}}{\\end{verbatim}}\n\\begin{minted}{c}\nx\n\\end{minted}",
         ]
         .into_iter(),
     );
     // Declarations over lines, and an environment wrapping minted.
-    assert!(environments.contains("rustcode") && environments.contains("snippet"));
+    for name in ["rustcode", "snippet", "listing"] {
+        assert!(environments.contains(name), "{name}");
+    }
     assert!(!environments.contains("plain"));
     let opens = |above: &[&str]| opens_minted(above, &environments);
+    // A line of code that is a comment in TeX (MATLAB's `% setup`) opens
+    // nothing; a comment among the options is still options.
+    assert!(!opens(&["\\begin{minted}{matlab}", "% setup"]));
+    assert!(opens(&["\\begin{minted}[", "  % a comment among the options", "]{matlab}"]));
     // Code all brackets, one line into a block, opens nothing.
     assert!(!opens(&["\\begin{minted}{json}", "[]"]));
     assert!(!opens(&["\\begin{minted}{json}", "[", "]"]));
