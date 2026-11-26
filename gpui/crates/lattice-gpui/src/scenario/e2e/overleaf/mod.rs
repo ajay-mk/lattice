@@ -41,6 +41,7 @@ mod reconnect;
 mod review;
 mod review_marks;
 mod review_panel;
+mod sleep;
 
 use std::{path::Path, time::Duration};
 
@@ -477,6 +478,7 @@ impl Run {
         linked.overleaf_live(cx, steps, &mock).await?;
         linked.overleaf_reconnect(cx, steps, &mock).await?;
         linked.overleaf_network_return(cx, steps, &mock).await?;
+        linked.overleaf_sleep(cx, steps, &mock).await?;
         linked.overleaf_review(cx, steps, &mock).await?;
         linked.overleaf_markdown_review(cx, steps, &mock).await?;
         linked.overleaf_chat(cx, steps, &mock).await?;
