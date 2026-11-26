@@ -54,6 +54,7 @@ mod documents;
 pub use documents::OverleafSaveState;
 mod finished;
 mod live;
+mod pause;
 mod presence;
 mod review;
 #[allow(unused_imports)]
@@ -146,6 +147,8 @@ pub enum OverleafBridgeEvent {
     OpenSettings,
     /// Who is in the project, or where they are, changed.
     PresenceChanged,
+    /// A paused link was resumed and may sync again (`pause`).
+    Resumed,
 }
 
 #[derive(Clone, Default)]
@@ -215,6 +218,9 @@ pub struct OverleafBridge {
     badge_task: Option<Task<()>>,
     channel_task: Option<Task<()>>,
     link_task: Option<Task<()>>,
+    /// The project resumed, until the link read after it says whether it
+    /// may sync.
+    resuming: Option<PathBuf>,
     /// Staged by a scenario (`scenario_stage`): shown as linked and live,
     /// but nothing reads the link again or asks Overleaf anything.
     staged: bool,
@@ -273,6 +279,7 @@ impl OverleafBridge {
             badge_task: None,
             channel_task: None,
             link_task: None,
+            resuming: None,
             staged: false,
             client: None,
             presence: Default::default(),
@@ -394,6 +401,7 @@ impl OverleafBridge {
             return;
         }
         self.root = root;
+        self.resuming = None;
         self.link = None;
         self.remote_changes = false;
         self.local_pending = false;
@@ -494,6 +502,12 @@ impl OverleafBridge {
                 });
                 this.status = status;
                 this.apply(cx);
+                if let Some(resumed) = this.resuming.take()
+                    && this.is_current(&resumed)
+                    && this.link().is_some()
+                {
+                    cx.emit(OverleafBridgeEvent::Resumed);
+                }
                 cx.notify();
             })
             .ok();
@@ -769,49 +783,6 @@ impl OverleafBridge {
             })
             .ok();
         }));
-    }
-
-    /// Pause or resume syncing this project. Pausing keeps the link and
-    /// everything it needs, so resuming is an ordinary sync that merges
-    /// whatever changed on either side meanwhile.
-    pub fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
-        if self.staged {
-            return;
-        }
-        let Some(root) = self.root.clone() else {
-            notices::error(
-                t!("Open the linked Overleaf project before changing its sync setting."),
-                "",
-                cx,
-            );
-            return;
-        };
-        let task = cx.background_spawn(async move { sync::set_paused(&root, paused) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.reload_link(cx);
-                    if paused {
-                        let weak = cx.entity().downgrade();
-                        notices::show(
-                            Notice::new(ToastLevel::Info, t!("Overleaf sync paused"))
-                                .detail(t!("Edits on both sides merge when you resume"))
-                                .key("overleaf-sync-paused")
-                                .action(NoticeAction::new(t!("Resume"), move |_, cx| {
-                                    weak.update(cx, |this, cx| this.set_paused(false, cx)).ok();
-                                })),
-                            cx,
-                        );
-                    } else {
-                        notices::dismiss("overleaf-sync-paused", cx);
-                    }
-                }
-                Err(error) => notices::error(t!("Could not change Overleaf sync"), error, cx),
-            })
-            .ok();
-        })
-        .detach();
     }
 
     pub(super) fn entity(&self, path: &str) -> Option<&(String, String)> {
