@@ -62,7 +62,7 @@ pub(crate) struct MockState {
     /// failed to apply it would.
     refuse_updates: bool,
     /// Updates go unanswered from now on: on a socket still heard from (a
-    /// heartbeat follows each), or on one gone silent.
+    /// heartbeat follows each), or on one gone silent; the roster too.
     unanswered: Option<Heard>,
 }
 
@@ -260,10 +260,16 @@ fn serve_websocket<S: Read + Write>(mut ws: WebSocket<S>, state: Arc<Mutex<MockS
             // which is exactly the case the client has to survive.
             "joinProject" if push_join => Ok(()),
             "joinProject" => send(&mut ws, ack_frame(&id, json!([null, project, "owner", 2]))),
-            "applyOtUpdate" if lock(&state).unanswered == Some(Heard::Heartbeats) => {
+            "applyOtUpdate" | "clientTracking.getConnectedUsers"
+                if lock(&state).unanswered == Some(Heard::Heartbeats) =>
+            {
                 send(&mut ws, encode_frame(FRAME_HEARTBEAT, "", "", ""))
             }
-            "applyOtUpdate" if lock(&state).unanswered == Some(Heard::Nothing) => Ok(()),
+            "applyOtUpdate" | "clientTracking.getConnectedUsers"
+                if lock(&state).unanswered == Some(Heard::Nothing) =>
+            {
+                Ok(())
+            }
             "joinDoc" if !lock(&state).docs.is_empty() => {
                 join_kept_doc(&mut ws, &state, &id, &frame.data)
             }
@@ -283,6 +289,7 @@ fn serve_websocket<S: Read + Write>(mut ws: WebSocket<S>, state: Arc<Mutex<MockS
                 ack
             }
             "applyOtUpdate" | "leaveDoc" => send(&mut ws, ack_frame(&id, json!([null]))),
+            "clientTracking.getConnectedUsers" => send(&mut ws, ack_frame(&id, json!([null, []]))),
             _ => Ok(()),
         };
         if sent.is_err() {
