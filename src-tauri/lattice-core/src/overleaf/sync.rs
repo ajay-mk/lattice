@@ -12,6 +12,7 @@
 
 use super::api::{csrf_token, http_client, DownloadGate, Remote};
 use super::case_collisions::{self, CaseCollision};
+use super::clock;
 use super::files::*;
 use super::link::{now_iso, save_state, Refusal, SyncState, Unsettled};
 use super::review::HistoryFrom;
@@ -354,7 +355,7 @@ fn sync_files(
         let written = linked
             .version(&client)
             .map(HistoryFrom::Version)
-            .unwrap_or_else(|| HistoryFrom::Time(chrono::Utc::now().timestamp_millis()));
+            .unwrap_or_else(|| HistoryFrom::Time(clock::now_ms(&linked.host)));
         own_writes.extend(pushed.iter().map(|path| (path.clone(), written)));
         // What went up is the agreed copy even if the file changed again
         // meanwhile; that newer edit goes up next time.
@@ -394,6 +395,7 @@ fn sync_files(
     state.refused = refused;
     state.unresolved_conflicts = result.unresolved_conflicts.clone();
     state.last_sync = Some(now_iso());
+    state.agreed_at = Some(clock::now_ms(&linked.host));
     // `remote_version_before` is the only history position known to precede
     // the downloaded snapshot. Never replace it with a newer value fetched at
     // the end: that newer value may include a collaborator's edit which is not
