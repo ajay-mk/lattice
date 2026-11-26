@@ -19,7 +19,9 @@
  *           scripts/inapp-lock, letting the lock go in between so a queued
  *           gate or lab run gets in; the rerun takes the lock too (`rerun`),
  *           with the scratch HOME and lab switches gpui/script/e2e gives the
- *           scenario. Run it outside the lock.
+ *           scenario. Then the idle guard (gpui/script/idle-guard, lattice#1025):
+ *           its frame counts under the lock, and 30 minutes of idle memory
+ *           growth outside it (runIdleGuard). Run it outside the lock.
  *   rerun   (internal) MODULES OUT: the rerun of those modules, under the lock.
  *   report  reads that record and keeps one GitHub issue, labelled
  *           `nightly-e2e`, in step (planIssue): it opens one for the first
@@ -67,6 +69,17 @@ export function failuresOf(record, verdict, quit = null) {
   if (record.e2e?.after_quit || quit === "lost") failures.push("e2e: quitting did not save the typed text");
   else if (verdict && !verdict.error && quit !== "saved") failures.push("e2e: could not check that quitting saved the typed text");
   return failures;
+}
+
+/** What the idle guard (gpui/script/idle-guard) found, one line each: its failed checks, or why it has none to show. */
+export function idleFailures(result, status) {
+  if (!result) return [`idle guard: no result (exit ${status})`];
+  if (result.error) return [`idle guard did not finish: ${result.error}`];
+  const failed = (result.checks ?? []).filter((check) => check.passed !== true).map((check) => `idle guard: ${check.name}`);
+  if (!result.checks?.length) failed.push("idle guard: ran no checks");
+  // A result written before a crash or the quit watchdog's exit.
+  else if (!failed.length && status !== 0) failed.push(`idle guard: exited ${status}`);
+  return failed;
 }
 
 const MARKER = /<!-- nightly-failures (\[.*?\]) -->/s;
@@ -117,6 +130,40 @@ const recordFile = (sha) => path.join(baselineDir(), `nightly@${sha}.json`);
 // Which run wrote a record: report takes only its own run's, so a night that
 // wrote none never reports an older night's record for the same commit.
 const runId = () => process.env.GITHUB_RUN_ID ?? "local";
+
+/**
+ * The idle guard on the release build the run left: its frame counts under
+ * the in-app lock (about a minute, 12 s of it in front), then 30 minutes of
+ * idle memory growth outside it. The growth run is a passive window, the
+ * CREW.md lock exception approved on 2026-11-26: it never activates, never
+ * takes the key window (GPUI_LAB_ASSUME_KEY) and sends no input, so it cannot
+ * disturb the runs that hold the lock, and holding it for half an hour would
+ * keep them out.
+ */
+function runIdleGuard(sha) {
+  const dir = mkdtempSync(path.join(tmpdir(), "gpui-nightly-idle-"));
+  const guard = path.join(repo, "gpui", "script", "idle-guard");
+  const run = (out, command) => {
+    const status = spawnSync(command[0], command.slice(1), { cwd: repo, stdio: "inherit" });
+    let result = null;
+    try {
+      result = JSON.parse(readFileSync(out, "utf8"));
+    } catch {
+      // idleFailures reports the missing result.
+    }
+    return idleFailures(result, status.status ?? status.signal);
+  };
+  try {
+    const frames = path.join(dir, "frames.json");
+    const growth = path.join(dir, "growth.json");
+    return [
+      ...run(frames, [path.join(repo, "scripts", "inapp-lock"), "--thread", `nightly-e2e ${sha.slice(0, 9)} idle`, "--wait", "1800", "--", guard, frames]),
+      ...run(growth, [guard, "--growth", "1800", growth]),
+    ];
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 /** The nightly record `report` reads for this run, or a failure that says why there is none. */
 export function nightlyFor(saved, { sha, subject, run }) {
@@ -170,7 +217,16 @@ function runNightly() {
     }
   }
   const nightly = { sha, subject, run: runId(), finished: new Date().toISOString(), baseline: record ? path.basename(baselineFile) : null, failures: failuresOf(record, verdict, existsSync(quitFile) ? readFileSync(quitFile, "utf8").trim() : null), flaky: verdict?.flaky ?? [], fixed: verdict?.fixed ?? [] };
-  writeFileSync(recordFile(sha), `${JSON.stringify(nightly, null, 2)}\n`);
+  const write = () => writeFileSync(recordFile(sha), `${JSON.stringify(nightly, null, 2)}\n`);
+  if (record.build?.status === "ok") {
+    // Recorded first, so a step that times out during the guard's half hour
+    // still reports what the gate, the build and the e2e found.
+    const failures = nightly.failures;
+    nightly.failures = [...failures, "idle guard: did not finish"];
+    write();
+    nightly.failures = [...failures, ...runIdleGuard(sha)];
+  }
+  write();
   const lines = [`Nightly full gate at ${sha.slice(0, 9)}: ${nightly.failures.length ? `${nightly.failures.length} failure(s)` : "green"}`, ...nightly.failures.map((failure) => `- ${failure}`), ...nightly.flaky.map((step) => `- flaky: ${step}`), ...nightly.fixed.map((step) => `- known failure that passed: ${step}`)];
   console.log(lines.join("\n"));
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## ${lines[0]}\n\n${lines.slice(1).join("\n")}\n`);
