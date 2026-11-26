@@ -58,8 +58,12 @@
  * built and published.
  */
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ACTIONS_FILE, actionsDiff, actionsNeeds } from "./gpui-actions-e2e.mjs";
 import { readModules } from "./gpui-e2e-modules.mjs";
+import { codeStream, streamable } from "./lib/token-stream.mjs";
 import { harnessInputs } from "./perf-bench/harness-inputs.mjs";
 
 export const FULL = "full";
@@ -70,6 +74,44 @@ export const FULL = "full";
 // is measured on main.
 const WEBKIT_BENCH_TOOLING = /^(scripts\/perf-bench(\.mjs|\/)|tools\/(mock-backend|perf-bench)\/|\.github\/actions\/bench-page\/)/;
 const NOT_BENCH_TOOLING = /^(src\/|package\.json$|pnpm-lock\.yaml$|\.github\/actions\/setup-pnpm\/)/;
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Comments a tool reads: a type checker's, a linter's or formatter's, a
+// bundler's or the test runner's directive, clippy's SAFETY note.
+const DIRECTIVE = /^#!|@(ts-|vitest-|jest-|jsx|vite-ignore|__PURE__)|#__PURE__|<reference|eslint|oxlint|prettier|biome|webpack|rustfmt|clippy|SAFETY:|noqa|pragma|cspell/;
+// A diff this wide is not a comment fix; reading every file would only slow the plan.
+const COMMENT_SCAN_MAX = 200;
+// Each base's text of a file, read once per run (macosNeeds and the gate ask more than once).
+const baseTexts = new Map();
+
+/**
+ * Whether the change to `file` from `base` to the working tree is only
+ * comments and the spacing between tokens, so building and linting it is the
+ * whole check: its code streams (scripts/lib/token-stream.mjs, for
+ * JavaScript, TypeScript, Rust and CSS) are the same before and after, and so
+ * are its directive comments (DIRECTIVE). A new, deleted or unreadable file,
+ * or any other language, is not.
+ */
+export function commentOnlyEdit(base, file, cwd = repoRoot) {
+  if (!streamable(file)) return false;
+  const key = `${cwd}\0${base}\0${file}`;
+  try {
+    if (!baseTexts.has(key)) baseTexts.set(key, execFileSync("git", ["show", `${base}:${file}`], { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }));
+    const before = baseTexts.get(key);
+    const after = readFileSync(path.join(cwd, file), "utf8");
+    const directives = (text) => text.split("\n").filter((line) => DIRECTIVE.test(line)).map((line) => line.trim()).join("\n");
+    return codeStream(file, before) === codeStream(file, after) && directives(before) === directives(after);
+  } catch {
+    // A file new since base, or unreadable: code.
+    return false;
+  }
+}
+
+/** The changed files whose change is only comments and spacing (commentOnlyEdit); none for a diff over COMMENT_SCAN_MAX files. */
+function commentOnlyEdits(base, files, cwd = repoRoot) {
+  if (!base || files.length > COMMENT_SCAN_MAX) return new Set();
+  return new Set(files.filter((file) => streamable(file) && existsSync(path.join(cwd, file)) && commentOnlyEdit(base, file, cwd)));
+}
 
 /** Whether these files change the WebKit benchmark itself. */
 export function touchesWebkitBench(files) {
@@ -241,15 +283,22 @@ export function e2eNeeds(gpuiFiles, covers = MODULE_COVERS, actions = null) {
 /**
  * What each macOS job group needs for this tier (`ciTier` in
  * scripts/ci-tier.mjs) and its files. With `base`, a change to the shell's
- * command bindings is read hunk by hunk against it (scripts/gpui-actions-e2e.mjs).
+ * command bindings is read hunk by hunk against it (scripts/gpui-actions-e2e.mjs),
+ * and a file whose change is only comments and whitespace (commentOnlyEdit)
+ * picks no e2e and no WebKit benchmark: its build and lint stages check it,
+ * and the nightly runs the whole scenario. When that leaves no GPUI file, the
+ * GPUI job runs no e2e (`e2e` null).
  */
 export function macosNeeds(tier, files, base = null) {
-  const diff = base && tier.gpuiFiles.includes(ACTIONS_FILE) ? actionsDiff(base) : null;
+  const inert = commentOnlyEdits(base, [...new Set([...tier.gpuiFiles, ...files])]);
+  const gpuiFiles = tier.gpuiFiles.filter((file) => !inert.has(file));
+  const diff = base && gpuiFiles.includes(ACTIONS_FILE) ? actionsDiff(base) : null;
+  const e2e = tier.full ? { full: true, modules: [], why: {}, fullBecause: ["full run"] } : gpuiFiles.length || !tier.gpuiFiles.length ? e2eNeeds(gpuiFiles, MODULE_COVERS, diff && actionsNeeds(diff, MODULE_COVERS)) : null;
   return {
     rust: tier.jobs.rust,
     gpui: tier.jobs.gpui,
-    e2e: !tier.jobs.gpui ? null : tier.full ? { full: true, modules: [], why: {}, fullBecause: ["full run"] } : e2eNeeds(tier.gpuiFiles, MODULE_COVERS, diff && actionsNeeds(diff, MODULE_COVERS)),
-    webkit: tier.jobs["perf-bench"] && touchesWebkitBench(files),
+    e2e: tier.jobs.gpui ? e2e : null,
+    webkit: tier.jobs["perf-bench"] && touchesWebkitBench(files.filter((file) => !inert.has(file))),
     release: files.filter((file) => RELEASE_PATHS.test(file)),
   };
 }

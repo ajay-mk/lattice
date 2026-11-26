@@ -278,6 +278,10 @@ export function localStages(tier, files, mergeBase, e2eNeed = macosNeeds(tier, f
       stages.push(heavy.has(stage.name) && !stage.skip ? buildStage(stage) : stage);
       continue;
     }
+    if (!e2eNeed) {
+      stages.push({ name: "gpui-e2e", skip: "only comments or whitespace changed in the GPUI inputs; the build checks them" });
+      continue;
+    }
     const only = e2eNeed.modules.length ? e2eNeed.modules.join(",") : "smoke";
     const ancestor = e2eNeed.full && !readBaseline(mergeBase)?.exact ? ancestorBaseline(mergeBase) : null;
     const older = ancestor?.distance <= OLDER_BASELINE_MAX ? ancestor : null;
@@ -307,7 +311,7 @@ export function localStages(tier, files, mergeBase, e2eNeed = macosNeeds(tier, f
     stages.push(e2e);
     if (older) stages.push(mainBaselineStage(mergeBase, verdict));
   }
-  if (macosNeeds(tier, files).webkit) {
+  if (macosNeeds(tier, files, mergeBase).webkit) {
     stages.push({
       name: "webkit-bench",
       why: "the WebKit benchmark and layout checks against their ceilings, as CI's macOS shards",

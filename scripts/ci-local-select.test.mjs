@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FULL, TEXT_ONLY, coveredJobs, dirModules, docsGate, e2eNeeds, findGate, formatTrailer, fullCover, macosNeeds, touchesWebkitBench, mainMergeRegate, parseTrailer, resolveCover } from "./ci-local-select.mjs";
+import { FULL, TEXT_ONLY, commentOnlyEdit, coveredJobs, dirModules, docsGate, e2eNeeds, findGate, formatTrailer, fullCover, macosNeeds, touchesWebkitBench, mainMergeRegate, parseTrailer, resolveCover } from "./ci-local-select.mjs";
 import { ciTier } from "./ci-tier.mjs";
 
 const covers = new Map([
@@ -407,5 +407,65 @@ describe.skipIf(process.platform === "win32")("ci-local-select: the docs-only pa
     const forged = git("rev-parse", "HEAD");
     git("checkout", "-q", "topic");
     expect(docsGate(forged, { cwd: dir }).ok).toBe(false);
+  });
+});
+
+describe("ci-local-select: a change of comments and whitespace only", () => {
+  it("is only comments and the spacing between tokens; never text in a string, a directive, a new file or another language", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "comment-only-"));
+    const git = (...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, encoding: "utf8" });
+    const rust = ["/// Adds one.", "fn add(x: i32) -> i32 {", "    x + 1", "}", "/**", " * The pointer.", " */", "fn set(p: &mut i32) {", "    *p = 1;", "}", 'const JS: &str = r#"', "// one", '"#;', "fn life<'a>(s: &'a str) -> char { let _ = s; 'x' }", ""].join("\n");
+    const script = ["/** Doc. */", "export function f() {", "  return 1;", "}", "export const s = `", "// one", "/* two */", "`;", 'export const t = "a b";', ""].join("\n");
+    const files = { "a.rs": rust, "b.ts": script, "c.css": ".a { color: blue; }\n.a .b, .c\\ d { color: red; }\n", "f.tsx": "export const p = <p>x</p>;\n", "g.mjs": "#!/usr/bin/env node\nconsole.log(1);\n", "e2e": "#!/bin/sh\n# Runs it.\necho hi\n", "d.yml": "a: 1\n" };
+    try {
+      for (const [file, text] of Object.entries(files)) writeFileSync(path.join(dir, file), text);
+      git("init", "-q");
+      git("add", "-A");
+      git("commit", "-q", "-m", "base");
+      const edit = (file, text) => {
+        writeFileSync(path.join(dir, file), text);
+        const inert = commentOnlyEdit("HEAD", file, dir);
+        writeFileSync(path.join(dir, file), files[file]);
+        return inert;
+      };
+      expect(edit("a.rs", rust.replace("/// Adds one.", "/// Adds one to x.\n// Kept small."))).toBe(true);
+      expect(edit("a.rs", rust.replace(" * The pointer.", " * The pointer\n * it writes."))).toBe(true);
+      expect(edit("a.rs", rust.replace("    x + 1", "        x + 1 // one more\n\n"))).toBe(true);
+      expect(edit("a.rs", rust.replace("    x + 1", "    x + 2"))).toBe(false);
+      expect(edit("a.rs", rust.replace("    *p = 1;", "    *p = 2;"))).toBe(false);
+      expect(edit("a.rs", rust.replace("\n// one\n", "\n// one, edited\n"))).toBe(false);
+      expect(edit("a.rs", rust.replace("'x'", "'y'"))).toBe(false);
+      expect(edit("a.rs", rust.replace("fn set", "// SAFETY: none needed.\nfn set"))).toBe(false);
+      expect(edit("b.ts", script.replace("/** Doc. */", "/** Doc, longer. */\n// Note."))).toBe(true);
+      expect(edit("b.ts", script.replace("  return 1;", "  return (\n    1\n  );"))).toBe(false);
+      expect(edit("b.ts", script.replace("  return 1;", "  return\n  1;"))).toBe(false);
+      expect(edit("b.ts", script.replace("// one", "// one, edited"))).toBe(false);
+      expect(edit("b.ts", script.replace("/* two */", "/*  two */"))).toBe(false);
+      expect(edit("b.ts", script.replace('"a b"', '"a  b"'))).toBe(false);
+      expect(edit("b.ts", "// @ts-expect-error\n" + script)).toBe(false);
+      expect(edit("c.css", files["c.css"].replace(".a {", "/* Blue. */\n.a  {\n "))).toBe(true);
+      expect(edit("c.css", files["c.css"].replace(".a .b", ".a/**/.b"))).toBe(false);
+      expect(edit("c.css", files["c.css"].replace(".c\\ d", ".c\\  d"))).toBe(false);
+      expect(edit("f.tsx", "// The paragraph.\nexport const p = <p>x</p>; /* Plain. */\n")).toBe(true);
+      expect(edit("f.tsx", "export const p = <p> x</p>;\n")).toBe(false);
+      expect(edit("g.mjs", "#!/usr/bin/env node\n// Logs.\nconsole.log(1);\n")).toBe(true);
+      expect(edit("g.mjs", "#!/usr/bin/env -S node --x\nconsole.log(1);\n")).toBe(false);
+      expect(edit("c.css", "// note\n.a { color: blue; }\n")).toBe(false);
+      expect(edit("e2e", "#!/bin/sh\n# Runs it, then says so.\necho hi\n")).toBe(false);
+      expect(edit("d.yml", "# A.\na: 1\n")).toBe(false);
+      writeFileSync(path.join(dir, "new.rs"), "// New.\n");
+      expect(commentOnlyEdit("HEAD", "new.rs", dir)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("runs no e2e and no WebKit benchmark when every GPUI file is unchanged in code, and the e2e for the rest", () => {
+    // Against HEAD, a file this checkout has not touched has the same code stream.
+    const file = "gpui/crates/lattice-gpui/src/main.rs";
+    const other = "gpui/crates/lattice-gpui/src/pdf/new_file_not_in_head.rs";
+    expect(macosNeeds(ciTier([file], { scan }), [file], "HEAD")).toMatchObject({ gpui: true, e2e: null });
+    expect(macosNeeds(ciTier([file, other], { scan }), [file, other], "HEAD").e2e.why[file]).toBeUndefined();
+    expect(macosNeeds(ciTier([file], { scan }), [file]).e2e).not.toBeNull();
   });
 });
