@@ -89,6 +89,20 @@ const DRAWN: &str = "JSON.stringify({ \
     text: document.querySelector('.cm-content')?.textContent ?? '', \
     theme: document.documentElement.dataset.theme || null })";
 
+/// Whether the page's document holds the text `latex_visual_follows` put
+/// into the buffer, whether that text lies in the range CodeMirror draws, and
+/// whether the drawn lines hold it. The page exposes no `EditorView`, so the
+/// view is found the way `EditorView.findFromDOM` finds it (`cmTile` now,
+/// `cmView` in older releases).
+const FOLLOWED: &str = "JSON.stringify((() => { \
+    const content = document.querySelector('.cm-latex-visual .cm-content'); \
+    const view = (content?.cmTile?.root ?? content?.cmView?.rootView)?.view; \
+    const at = view ? view.state.doc.toString().indexOf('Written in the source.') : null; \
+    return { \
+      doc: at === null ? null : at >= 0, \
+      viewport: at === null || at < 0 ? null : at >= view.viewport.from && at <= view.viewport.to, \
+      drawn: (content?.textContent ?? '').includes('Written in the source.') }; })())";
+
 /// The page's `\\colorbox`es (lattice#1327): each one element over its whole
 /// command, laid out on one line and filled in its colour, and none for
 /// soul's `\\hl`.
@@ -519,22 +533,29 @@ impl Run {
                 });
             }
         })?;
-        let mut followed = false;
+        // CodeMirror draws only the lines near its viewport, so the drawn
+        // lines are asked for the edit only when it lies in that range; past
+        // it the page's document has to hold it. On GitHub's macOS runner,
+        // whose window is smaller than the Mac mini's, `.cm-content` never
+        // held the edit before `\end{document}` (the v0.20.1 tag run, and
+        // main at 0fef86e94), likely because it lay past that range;
+        // `viewport` and `drawn` record which it was, and `ms` how long.
+        let followed = |page: &Value| {
+            page["doc"] == true && (page["drawn"] == true || page["viewport"] == false)
+        };
+        let mut page = Value::Null;
         let started = std::time::Instant::now();
-        while started.elapsed() < Duration::from_secs(6) {
-            let page = self.evaluate(cx, island, DRAWN).await;
-            followed = page["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("Written in the source."));
-            if followed {
+        while started.elapsed() < Duration::from_secs(10) {
+            page = self.evaluate(cx, island, FOLLOWED).await;
+            if followed(&page) {
                 break;
             }
             self.pause(cx, Duration::from_millis(150)).await;
         }
         steps.check(
             "text put into the buffer reaches the Visual view",
-            followed,
-            json!({ "followed": followed }),
+            followed(&page),
+            json!({ "page": page, "ms": started.elapsed().as_millis() }),
         );
         Ok(())
     }
