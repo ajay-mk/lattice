@@ -188,7 +188,18 @@ impl Shell {
             // What was edited while paused was kept on disk here and
             // against the last sync's copy there, so this sync merges both
             // sides line by line and leaves a clash marked up, as any sync.
-            OverleafBridgeEvent::Resumed => self.sync_overleaf(window, cx),
+            // Resumed from Settings in manual mode: Review changes comes to
+            // the front rather than opening behind Settings.
+            OverleafBridgeEvent::Resumed => {
+                let bridge = self.overleaf.read(cx);
+                let opens_review = bridge.mode() == OverleafSyncMode::Manual
+                    && bridge.link().is_some()
+                    && !bridge.syncing();
+                if opens_review && self.settings.is_some() {
+                    self.close_settings(cx);
+                }
+                self.sync_overleaf(window, cx)
+            }
         }
     }
 
