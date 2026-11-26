@@ -36,12 +36,16 @@
  * The literature Worker, the Open Slide runtime, the research environment, the
  * Chromium benchmark, Linux and Windows run only in CI.
  *
- * Every Rust and GPUI stage waits while a perf measurement holds
- * /tmp/lattice-inapp-test.lock, and compiles in the machine's shared build
- * tree under its build lock (scripts/gpui-build.mjs). The stages that open
- * windows (gpui-main, gpui-e2e, webkit-bench) hold that lock for their whole
- * run through scripts/inapp-lock, so no hand test or other run drives the
- * screen under them.
+ * Every Rust and GPUI build and unit-test stage waits while a perf
+ * measurement or a hand test holds /tmp/lattice-inapp-test.lock, but not
+ * while another run's GPUI e2e does (holderRunsE2e, --kind e2e): a waiting
+ * gate builds meanwhile and queues only for its own e2e. Each runs as an
+ * `inapp-lock build`, so a quiet holder queued behind that e2e waits for it
+ * to end before measuring. They compile in the machine's
+ * shared build tree under its build lock (scripts/gpui-build.mjs). Only the
+ * stages that open windows (gpui-main, gpui-e2e, webkit-bench) take that lock,
+ * holding it for their whole run through scripts/inapp-lock, so no hand test
+ * or other run drives the screen under them.
  *
  * When every stage passes and the change needed a macOS job, it prints a
  * `CI-local: macos <tree> rust gpui e2e=… [webkit]` trailer naming the stages
@@ -83,7 +87,7 @@
  *                may open windows before pushing
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -110,10 +114,13 @@ const INAPP_WAIT_S = 3600;
  */
 export function holdingInappLock(stage) {
   const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+  // The e2e stages say so, and builds run beside them; the WebKit benchmark
+  // measures, so it is quiet and waits for the running builds first.
+  const kind = stage.name === "webkit-bench" ? "quiet" : "e2e";
   return {
     ...stage,
     command: path.join(repo, "scripts", "inapp-lock"),
-    args: ["--thread", `ci:local ${branch} ${stage.name}`, "--wait", String(INAPP_WAIT_S), "--", stage.command, ...(stage.args ?? [])],
+    args: ["--thread", `ci:local ${branch} ${stage.name}`, "--wait", String(INAPP_WAIT_S), "--kind", kind, "--", stage.command, ...(stage.args ?? [])],
     timeout: stage.timeout + INAPP_WAIT_S * 1000,
   };
 }
@@ -130,15 +137,56 @@ const LOCAL = {
   "synara-pin": "check-synara-pin",
 };
 
-/** Whether a perf measurement holds the lock: lockf takes it for an instant only when it is free. */
+/**
+ * Whether the in-app lock's holder (its record, as scripts/inapp-lock writes
+ * it) runs a GPUI e2e scenario: it said so (--kind e2e) and is the live
+ * process that holds the file. Such a run drives only its own windows, so a
+ * build beside it costs it some speed and nothing else, and a waiting gate
+ * builds meanwhile and queues for the lock only for its e2e. Any other holder
+ * (a perf measurement, a hand test, the WebKit benchmark, plain lockf) keeps
+ * the machine quiet, and so does a record left by a holder that was killed
+ * before it could clear it, or one that cannot be read.
+ */
+export function holderRunsE2e(record, holders = lockHolders) {
+  if (record?.kind !== "e2e" || !Number.isInteger(record.pid)) return false;
+  try {
+    process.kill(record.pid, 0);
+  } catch (error) {
+    if (error.code !== "EPERM") return false;
+  }
+  return holders().includes(record.pid);
+}
+
+function lockHolders() {
+  const out = spawnSync("lsof", ["-t", PERF_LOCK], { encoding: "utf8" }).stdout ?? "";
+  return out.split(/\s+/).filter(Boolean).map(Number);
+}
+
+/**
+ * Whether a holder that wants a quiet machine has the lock: lockf takes it
+ * for an instant only when it is free. A quiet holder that took it through
+ * scripts/inapp-lock also waits for the builds already running
+ * (`inapp-lock build`, buildStage) before it starts, so a build let in beside
+ * an e2e never overlaps the measurement queued after it.
+ */
 function perfLockHeld() {
   if (process.platform !== "darwin" || !existsSync(PERF_LOCK)) return false;
-  return spawnSync("/usr/bin/lockf", ["-k", "-t", "0", PERF_LOCK, "true"], { stdio: "ignore" }).status !== 0;
+  if (spawnSync("/usr/bin/lockf", ["-k", "-t", "0", PERF_LOCK, "true"], { stdio: "ignore" }).status === 0) return false;
+  try {
+    return !holderRunsE2e(JSON.parse(readFileSync(PERF_LOCK, "utf8")));
+  } catch {
+    return true;
+  }
+}
+
+/** A heavy stage run as a build of scripts/inapp-lock, after no quiet holder has the lock. */
+export function buildStage(stage) {
+  return { ...stage, command: path.join(repo, "scripts", "inapp-lock"), args: ["build", "--", stage.command, ...(stage.args ?? [])], before: waitForPerfLock };
 }
 
 async function waitForPerfLock() {
   for (let checks = 0; perfLockHeld(); checks += 1) {
-    if (checks % 4 === 0) console.log(`  waiting: a perf measurement holds ${PERF_LOCK} (${checks / 4} min so far)`);
+    if (checks % 4 === 0) console.log(`  waiting: a perf measurement or hand test holds ${PERF_LOCK} (${checks / 4} min so far); a GPUI e2e there would not hold this build`);
     await sleep(15_000);
   }
 }
@@ -159,7 +207,6 @@ function mainBaselineStage(mergeBase) {
     command: "sh",
     args: ["-c", 'git worktree remove --force "$1" 2>/dev/null; git worktree add --detach "$1" "$2" && (cd "$1" && node scripts/gpui-main-baseline.mjs --sha "$2"); status=$?; git worktree remove --force "$1"; exit $status', "sh", worktree, mergeBase],
     timeout: 3_600_000,
-    before: waitForPerfLock,
   };
 }
 
@@ -188,11 +235,11 @@ export function localStages(tier, files, mergeBase, e2eNeed = macosNeeds(tier, f
     clippy: jobs.rust,
     "cargo-test": jobs.rust,
   };
-  const heavy = new Set(["clippy", "cargo-test", "gpui-patch", "gpui-build", "gpui-test", "gpui-e2e"]);
+  const heavy = new Set(["clippy", "cargo-test", "gpui-patch", "gpui-build", "gpui-test"]);
   for (const stage of extraStages(files, mergeBase, { gpui: jobs.gpui, tauri: jobs.rust })) {
     if (stage.name.startsWith("gpui-") ? !jobs.gpui : !keep[stage.name]) continue;
     if (stage.name !== "gpui-e2e" || stage.skip) {
-      stages.push(heavy.has(stage.name) && !stage.skip ? { ...stage, before: waitForPerfLock } : stage);
+      stages.push(heavy.has(stage.name) && !stage.skip ? buildStage(stage) : stage);
       continue;
     }
     const only = e2eNeed.modules.length ? e2eNeed.modules.join(",") : "smoke";
@@ -202,8 +249,8 @@ export function localStages(tier, files, mergeBase, e2eNeed = macosNeeds(tier, f
       : { ...stage, why: `the smoke flow${e2eNeed.modules.length ? ` and ${e2eNeed.modules.length} module(s) the diff picks` : ""}, failing only on steps main fails too`, args: ["--only", only] };
     e2e.env = { ...stage.env, LATTICE_E2E_VERDICT: "1" };
     // The baseline is read when the stage starts, after gpui-main wrote it.
+    // The stage waits for the in-app lock itself (holdingInappLock).
     e2e.before = async () => {
-      await waitForPerfLock();
       const baseline = readBaseline(mergeBase);
       if (baseline?.exact) e2e.env.LATTICE_E2E_BASELINE = baseline.file;
       else console.log("  gpui-e2e: no main baseline for the merge base; judging against the known failures alone");
@@ -217,7 +264,6 @@ export function localStages(tier, files, mergeBase, e2eNeed = macosNeeds(tier, f
       command: "sh",
       args: ["-c", "pnpm exec playwright-core install webkit >/dev/null && pnpm perf:bench --check --machine-allowance --layout --engine webkit"],
       timeout: 2_400_000,
-      before: waitForPerfLock,
     });
   }
   return stages;
