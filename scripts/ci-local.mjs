@@ -140,7 +140,10 @@ const LOCAL = {
 /**
  * Whether the in-app lock's holder (its record, as scripts/inapp-lock writes
  * it) runs a GPUI e2e scenario: it said so (--kind e2e) and is the live
- * process that holds the file. Such a run drives only its own windows, so a
+ * process that holds the file. A record with no kind at all comes from a
+ * branch's scripts/inapp-lock from before --kind (lattice#1300); it counts as
+ * an e2e when its command is gpui/script/e2e, so gates stop waiting behind
+ * those branches' e2e runs. Such a run drives only its own windows, so a
  * build beside it costs it some speed and nothing else, and a waiting gate
  * builds meanwhile and queues for the lock only for its e2e. Any other holder
  * (a perf measurement, a hand test, the WebKit benchmark, plain lockf) keeps
@@ -148,7 +151,8 @@ const LOCAL = {
  * before it could clear it, or one that cannot be read.
  */
 export function holderRunsE2e(record, holders = lockHolders) {
-  if (record?.kind !== "e2e" || !Number.isInteger(record.pid)) return false;
+  const e2e = record?.kind === "e2e" || (record?.kind === undefined && /^(\S*\/)?script\/e2e(\s|$)/.test(record?.command ?? ""));
+  if (!e2e || !Number.isInteger(record.pid)) return false;
   try {
     process.kill(record.pid, 0);
   } catch (error) {
